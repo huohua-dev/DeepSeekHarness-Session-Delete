@@ -100,6 +100,10 @@ const idMatch = /id:\s*'([^']+)'/.exec(clientSource)
 if (idMatch !== null && idMatch[1] !== pkg.name) {
   fail(`client.js entry id '${idMatch[1]}' != package name '${pkg.name}' (clientModules keys the bundle by id)`)
 }
+const versionMatch = /const VERSION = '([^']+)'/.exec(clientSource)
+if (versionMatch !== null && versionMatch[1] !== pkg.version) {
+  fail(`client.js VERSION '${versionMatch[1]}' != package.json version '${pkg.version}' (bump both together)`)
+}
 const patchPath = pkg.dsh?.bundle?.patch
 if (typeof patchPath === 'string' && existsSync(join(ROOT, patchPath))) {
   const patch = readFileSync(join(ROOT, patchPath), 'utf8')
