@@ -58,7 +58,7 @@ Click **Clean workspace** at the sidebar foot and pick a workspace — every ses
 
 ![The cleanup panel: pick a workspace, then Clean](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup.png)
 
-- If anything in that workspace is busy (replying, waiting for approval, subagents / jobs / reminders), the whole clean is refused and the button is greyed out. A failed pre-flight request is reported as such, not as "N running".
+- If anything in that workspace is busy (replying, waiting for approval, subagents / jobs / reminders), the clean is refused and the dialog says what is running; its button then reads **Stop and delete**, and a second click stops that work and deletes (a pending reminder never finishes on its own, so this is the way through). A failed pre-flight request is reported as such, not as "N running".
 - Large groups work (tested with 230+ sessions); the old 200-session cap is gone. Subagent sessions go with their parent.
 - Archived sessions go too; the row says "N sessions in total · M not in the list", so the count you see is the count that disappears.
 - The workspace itself is kept and simply becomes empty. To drop it as well, use **Clean and remove group** in the confirmation; if any session fails to delete, the group is **kept** and the failures are listed.
