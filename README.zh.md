@@ -7,7 +7,7 @@
 
 DSH 有归档、重命名、分叉，却**没有删除会话**。这个插件在侧栏每个会话的 `⋯` 菜单里补上一项红色「删除会话」，点之前先弹确认框。删就是真删：不会给你留个"看起来删了、过两天又冒出来"的尾巴。
 
-![会话菜单中的「删除会话」](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo.png) ![删除确认框](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-confirm.png) ![会话运行中，删除自动置灰](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-busy.png)
+![会话菜单中的「删除会话」](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo.png) ![删除确认框](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-confirm.png) ![会话有进行中的工作：确认框里可以先停止再删除](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-busy.png)
 
 ## 安装
 
@@ -59,6 +59,8 @@ dsh plugin --profile desktop remove dsh-session-clean
 - 清理时会显示进度，结束告诉你删了几个；如果正在看的会话被删了，会自动切到同分组的新会话
 
 ![清空确认框](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-confirm.png) ![清理完成](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-done.png)
+
+![部分失败时保留分组并列出失败条目](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-partial.png)
 
 ### 两条“删分组”的路，故意分开
 

@@ -13,7 +13,7 @@
 
 DeepSeek Harness has archive, rename and fork — but no way to **delete** a conversation. This plugin adds the missing red **Delete session** row to every session's `⋯` menu, with a confirmation dialog in front of it. It deletes for real: no hidden leftovers that quietly come back.
 
-![Delete session in the session menu](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo.png) ![Confirmation dialog](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-confirm.png) ![Greyed out while the session is busy](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-busy.png)
+![Delete session in the session menu](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo.png) ![Confirmation dialog](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-confirm.png) ![Busy session: the dialog offers stop and delete](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-busy.png)
 
 ### Install
 
@@ -65,6 +65,8 @@ Click **Clean workspace** at the sidebar foot and pick a workspace — every ses
 - You get progress while it runs and a count when it ends. If you were viewing a session that got deleted, the view moves to a new session in the same workspace.
 
 ![The confirmation](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-confirm.png) ![Finished](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-done.png)
+
+![A partial failure keeps the group and lists what failed](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-partial.png)
 
 ### Two ways to get rid of a workspace — deliberately different
 
@@ -139,7 +141,7 @@ Until the DSH process exits, an idle Agent object stays in memory — DSH offers
 
 DSH 有归档、重命名、分叉，却**没有删除会话**。这个插件在侧栏每个会话的 `⋯` 菜单里补上一项红色「删除会话」，点之前先弹确认框。删就是真删：不会给你留个"看起来删了、过两天又冒出来"的尾巴。
 
-![会话菜单中的「删除会话」](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo.png) ![删除确认框](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-confirm.png) ![会话运行中，删除自动置灰](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-busy.png)
+![会话菜单中的「删除会话」](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo.png) ![删除确认框](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-confirm.png) ![会话有进行中的工作：确认框里可以先停止再删除](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-busy.png)
 
 ### 安装
 
