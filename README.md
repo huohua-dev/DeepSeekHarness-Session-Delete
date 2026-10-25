@@ -47,9 +47,9 @@ dsh plugin --profile desktop remove dsh-session-clean
 ### What you get
 
 - A red **Delete session** item in every session's `⋯` menu, after pin / rename / fork / archive.
-- It greys out by itself while that session is busy (replying, or waiting for your approval or answer).
+- It dims while that session is busy (replying, or waiting for your approval or answer). The dialog says what is running (turn / subagents / background jobs / reminders) and offers **Stop and delete**, which asks for a second confirmation.
 - Archived sessions can be deleted too — clearing the archive out is the main reason people install this.
-- One confirmation dialog, then it is done.
+- One confirmation dialog that states how many subagent sessions go with it and how many forks are kept, then it is done.
 - A **Clean workspace** action at the sidebar foot: pick a workspace, see how many sessions it holds, confirm once, and every session in it is deleted in one go.
 
 ### Cleaning a whole workspace
@@ -58,9 +58,10 @@ Click **Clean workspace** at the sidebar foot and pick a workspace — every ses
 
 ![The cleanup panel: pick a workspace, then Clean](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup.png)
 
-- If anything in that workspace is busy (replying, or waiting for your approval), the whole clean is refused and the button is greyed out.
+- If anything in that workspace is busy (replying, waiting for approval, subagents / jobs / reminders), the whole clean is refused and the button is greyed out. A failed pre-flight request is reported as such, not as "N running".
+- Large groups work (tested with 230+ sessions); the old 200-session cap is gone. Subagent sessions go with their parent.
 - Archived sessions go too; the row says "N sessions in total · M not in the list", so the count you see is the count that disappears.
-- The workspace itself is kept and simply becomes empty. To drop it as well, use **Clean and remove group** in the confirmation.
+- The workspace itself is kept and simply becomes empty. To drop it as well, use **Clean and remove group** in the confirmation; if any session fails to delete, the group is **kept** and the failures are listed.
 - You get progress while it runs and a count when it ends. If you were viewing a session that got deleted, the view moves to a new session in the same workspace.
 
 ![The confirmation](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-confirm.png) ![Finished](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-done.png)
@@ -87,34 +88,39 @@ The shipped **Delete workspace** action and this plugin's panel do different thi
 
 | | |
 |---|---|
-| ✅ Deleted | The conversation itself, its cached title / outline / token stats, oversized tool output spilled to disk, and its entries in the sidebar bookkeeping (grouping, pin, archive) |
-| ❌ Left alone | Attachments under `~/.dsh/attachments/` — they are stored by content hash and can be shared by several conversations, so deleting one session's copy could damage another conversation |
-| ❌ Left alone | This plugin's own log (`~/.dsh/logs/session-delete.log`) — it records what was deleted |
+| ✅ Deleted | The conversation itself |
+| ✅ Deleted | Its **subagent sessions**, at any depth — including `subagent_fork` children that carry a full copy of the parent's history |
+| ✅ Deleted | Their cached title / outline / token stats (`session_projcache`) and oversized tool output spilled to disk |
+| ✅ Deleted | Their sidebar bookkeeping (grouping, pin, archive) — changed only through DSH's workspace registry API |
+| ✅ Deleted | **Reminders** bound to those sessions (pending and finished) |
+| ❌ Left alone | Sessions **forked** from it — a fork copies the prefix and stands on its own; the dialog says how many there are |
+| ❌ Left alone | **Attachments are not deleted**: files under `~/.dsh/attachments/` are content-addressed and can be shared by several conversations (forks included) |
+| ❌ Left alone | This plugin's own log (`~/.dsh/logs/session-delete.log`) — ids and outcomes only, no titles; rotated past 1 MB |
 | ❌ Left alone | Copies that other plugins make into their own databases |
 
-Until the DSH process exits, an empty session object stays in memory — DSH offers no official way to clear it. It no longer shows up in any list, and it is gone after a restart.
+Until the DSH process exits, an idle Agent object stays in memory — DSH offers no official way to clear it. It no longer shows up in any list, and it is gone after a restart.
 
 ### FAQ
 
 - **Can I get a deleted session back?** No. There is no undo.
-- **Can I delete a session that is replying right now?** No — the action is blocked until it stops, and it tells you why.
+- **Can I delete a session that is replying right now?** Not by default — the delete is refused and the dialog lists what is running. **Stop and delete** uses DSH's own archive flow to stop the turn, subagents, background jobs and reminders, waits until they have actually stopped, then deletes. If they do not stop in time nothing is deleted and pin / archive state is restored.
 - **It said "hidden for now" — what does that mean?** That DSH build does not allow a full removal, so the plugin hid the session instead of lying to you. The row disappears for good after you restart DSH.
 - **What if I delete the session I am looking at?** It works; the window is simply empty until you open another session.
-- **Can it damage another conversation?** No. Only files belonging to that one session are touched.
+- **Can it damage another conversation?** No. Only files of that session and its subagent sessions are touched; forks and attachments are not.
 - **Do I have to restart after deleting?** No.
 - **Does it talk to the internet?** No network calls, no telemetry.
 
 ### Permissions & privacy
 
 - Opens one **local-only** HTTP route inside your own DSH process, behind DSH's own connection trust check — outside connections cannot reach it.
-- Deletes only that one session's own files: `~/.dsh/sessions/…`, `~/.dsh/storages/session_projcache/…`, and its spilled-output folder inside the temp directory.
+- Deletes only the files of that session and its subagent sessions: the log directory (located through DSH's persistence backend, default `~/.dsh/sessions/…`), `~/.dsh/storages/session_projcache/…`, and their spilled-output folders inside the temp directory. Registry and reminders are changed only through DSH's own services.
 - No network calls, no telemetry, no external services.
 
 ### Compatibility
 
 | | |
 |---|---|
-| DeepSeek Harness | desktop `0.2.0-rc.2` — the tested target |
+| DeepSeek Harness | desktop `0.2.1-rc.3` — tested with 1.7.0 (end to end, isolated DSH home). 1.6.x and older target `0.2.0-rc.2`; on 0.2.1 their busy check never fires and subagent sessions are left behind — please upgrade |
 | Profile | **desktop: tested and supported.** Web-surface profiles (browser-form `dsh web`): expected to work (only web-surface APIs are used, no desktop-only calls) but **not separately tested — try at your own risk and report back** |
 | Node | ≥ 18 (ships with the DSH runtime) |
 | Capability class | 界面与体验 (UI & experience) |
@@ -122,8 +128,8 @@ Until the DSH process exits, an empty session object stays in memory — DSH off
 ### Technical notes (safe to skip)
 
 - **Client half** (`client.js`): one `order: 500` row in the official `sidebar.workspaces.session.menu.item` slot list, the same extension point the built-in rows use; busy state comes from the host-injected `useSessionStatus` snapshot; the dialog lives in the frame-wide `shell.overlay` slot so closing the menu cannot kill it.
-- **Host half** (`index.js`): a private `/_dsh-session-clean` route re-probes the session, then deletes in one order — unload the session from the Host's live store, remove it from the workspace registry, erase the durable files (log directory, `session_projcache` record, spill directory). The registry is written through the same open storage-domain handle the registry itself holds, so the sidebar refreshes from the change event.
-- **Unloading a resident session** uses the framework's own teardown primitive, `SessionStore.liveEntryFor(session).detach()` — the same `store.delete` + `session/disposed` an owner's unload performs. That event is what the session controller turns into `api-session/removed`, which makes the browser drop the row for real and closes the session's log writer, so the transcript cannot be re-persisted. `liveEntryFor` / `detachEntered` are internal (absent from the generated API catalog), so each step is capability-probed; any failure falls back to a reported hide instead of a silent lie.
+- **Host half** (`index.js`): a private `/_dsh-session-clean` route (its disposer owned by `ctx.effect`, so disable / reload is safe) deletes in one order — ① collect the subagent subtree from `sessionPersistence.list()` headers (`origin: 'subagent'` along `parentSession`), forks only counted → ② run the official `workspace/session-activity` admission (turn / subagent / job / schedule) plus `agent.status` for every member; activity answers 409 → ③ `workspaceRegistry.archiveSession(id, { stopActivity })` stops work, drops the pin and freezes the session; with stop it polls until activity drains → ④ reminders removed through the schedule service → ⑤ resident members flushed then unloaded, leaf first → ⑥ `WorkspaceEntity.detachSession` → ⑦ erase the log directory (from the backend's `locate` / `root`), `session_projcache` record and spill directory, each with bounded retries → ⑧ `unarchiveSession` once a member is gone. The registry is touched **only through its public methods**: a raw storage-domain write is overwritten by the registry's cached state on its next official write.
+- **Unloading a resident session** uses the framework's own teardown primitive, `SessionStore.liveEntryFor(session).detach()` — the same `store.delete` + `session/disposed` an owner's unload performs. That event is what the session controller turns into `api-session/removed`, which makes the browser drop the row for real and closes the session's log writer, so the transcript cannot be re-persisted. `liveEntryFor` / `detachEntered` are internal (absent from the generated API catalog), so each step is capability-probed; a failure keeps the member archived as a reported hide (`hidden: true`) instead of a silent lie, and the startup self-heal clears that marker through `unarchiveSession` after a restart.
 - **The projection cache needs its own handling**: it is a self-healing write-behind cache whose real domain table is `sessions`, keyed by the full session id. Removing the key through the live domain — not just the backing file — is what stops the next checkpoint from recreating the document.
 - No `app.asar` patching and no overriding of official loader rows, so DSH upgrades are safe.
 
@@ -167,9 +173,9 @@ dsh plugin --profile desktop remove dsh-session-clean
 ### 它能做什么
 
 - 每个会话的 `⋯` 菜单里多一项红色「**删除会话**」（排在置顶 / 重命名 / 分叉 / 归档之后）
-- 会话正在干活时（回复中，或等你审批 / 回答）**自动变灰**，点不动
+- 会话正在干活时（回复中、等你审批 / 回答）菜单项会变淡；确认框会写明它在忙什么（回合 / 子代理 / 后台任务 / 提醒），可以选「**停止并删除**」，并且还要再确认一次
 - **已归档的会话一样能删**——清库存最好用
-- 删除前弹一次确认框，确认后才动手
+- 删除前弹一次确认框，写明会一并删除几个子代理会话、保留几个分叉会话，确认后才动手
 - 侧栏底部多一个「**清理分组**」入口：选一个分组、看清会话数量、确认一次，整组会话一次删完
 
 ### 清理整个分组
@@ -178,9 +184,10 @@ dsh plugin --profile desktop remove dsh-session-clean
 
 ![清理分组面板：选一个分组，点清空](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup.png)
 
-- 组里有会话正在跑（回复中、等你确认），这个分组就清不了，按钮是灰的
+- 组里有会话正在跑（回复中、等你确认、子代理 / 后台任务 / 提醒），整批都不删，按钮是灰的；预检请求本身失败会单独提示，不会误报成「正在运行」
+- 分组再大也能清（实测 230+ 个会话的分组），不再有 200 个的上限；子代理会话跟着各自的主会话一起删
 - 已归档的会话也会一起删；行上写明「共 N 个会话 · M 个不在列表」，看到多少就删多少
-- 分组本身留着，只是变成空分组。想连分组一起删，用确认框里的「清空并移除分组」
+- 分组本身留着，只是变成空分组。想连分组一起删，用确认框里的「清空并移除分组」；只要有一个会话没删成功，分组就**不会**被移除，并列出失败的会话
 - 清理时会显示进度，结束告诉你删了几个；如果正在看的会话被删了，会自动切到同分组的新会话
 
 ![清空确认框](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-confirm.png) ![清理完成](https://raw.githubusercontent.com/Ansellwan/DeepSeekHarness-Session-Delete/main/docs/demo-cleanup-done.png)
@@ -207,34 +214,39 @@ dsh plugin --profile desktop remove dsh-session-clean
 
 | | |
 |---|---|
-| ✅ 会删 | 这段对话本身，它的标题 / 大纲 / token 统计等缓存，工具输出过长时落盘的溢出文件，以及它在侧栏里的各种登记（分组、置顶、归档） |
-| ❌ 不动 | `~/.dsh/attachments/` 里的附件原件——它们按内容存一份，多个会话可能共用同一份，按会话删会连累别的对话 |
-| ❌ 不动 | 本插件自己的日志（`~/.dsh/logs/session-delete.log`，记录删过谁、删了哪些文件） |
+| ✅ 会删 | 这段对话本身 |
+| ✅ 会删 | 它派出的**子代理会话**（任意层级；包括 `subagent_fork` 那种复制了完整父会话历史的子代理） |
+| ✅ 会删 | 上面这些会话的标题 / 大纲 / token 统计等缓存（`session_projcache`），以及工具输出过长时落盘的溢出文件（spill） |
+| ✅ 会删 | 它们在侧栏里的登记（分组、置顶、归档）——全部经 DSH 官方工作区注册表的公开方法修改 |
+| ✅ 会删 | 绑定在这些会话上的**提醒**（未触发的和已结束的都删） |
+| ❌ 不动 | 从它**分叉（fork）**出去的会话——分叉复制了前缀、自成一体，删原会话不影响它们；确认框会写明有几个 |
+| ❌ 不动 | **附件不会删除**：`~/.dsh/attachments/` 里的原件按内容寻址存一份，多个会话（包括分叉）可能共用，按会话删会连累别的对话 |
+| ❌ 不动 | 本插件自己的日志（`~/.dsh/logs/session-delete.log`，只记会话 id 与结果、不记标题；超过 1 MB 轮转一份） |
 | ❌ 不动 | 其他插件自己抄到各自数据库里的副本 |
 
-另外，DSH 进程退出前，内存里还会留一个空的会话对象（官方没提供清理它的接口）。它不会再出现在任何列表里，重启后彻底消失。
+另外，DSH 进程退出前，内存里还会留一个空的 Agent 对象（官方没提供清理它的接口）。它不会再出现在任何列表里，重启后彻底消失。
 
 ### 常见问题
 
 - **删了还能恢复吗？** 不能。没有回收站，也没有撤销。
-- **正在回复的会话能删吗？** 不能，会被拦下并提示原因；等它停下来再删。
+- **正在回复的会话能删吗？** 默认不能，会被拦下并列出在忙什么。确认框里可以选「停止并删除」：插件走 DSH 官方归档流程先停掉回合、子代理、后台任务和提醒，等它们真正停下再删；停不下来（超时）就什么都不删，并恢复原来的置顶 / 归档状态。
 - **提示"先藏起来"是什么意思？** 说明当前 DSH 版本不支持彻底移除，插件只能先把它隐藏，并如实告诉你；这一行会在**重启 DSH 后彻底消失**。插件宁可说清楚，也不会假装删成功。
 - **删的时候正在看这个会话怎么办？** 能删，但删完窗口会空着，点开别的会话即可。
-- **会误删别的会话吗？** 不会。只动这一个会话自己的文件。
+- **会误删别的会话吗？** 不会。只动这个会话和它的子代理会话自己的文件；分叉会话和附件都不碰。
 - **删完要不要重启才生效？** 不用。
 - **会联网吗？** 不会，没有任何网络请求、没有遥测。
 
 ### 权限与隐私
 
 - 只在你自己的 DSH 进程里开一个**仅本机**可用的接口，并走 DSH 官方同一道连接信任检查，外部连不进来
-- 只删这一个会话自己的文件：`~/.dsh/sessions/…`、`~/.dsh/storages/session_projcache/…`，以及临时目录里属于它的溢出文件目录
+- 只删这个会话（及其子代理会话）自己的文件：会话日志目录（位置取自 DSH 持久化后端的配置，默认 `~/.dsh/sessions/…`）、`~/.dsh/storages/session_projcache/…`，以及临时目录里属于它们的溢出文件目录；注册表与提醒只通过 DSH 官方服务修改
 - 无网络请求、无遥测、无外部服务
 
 ### 兼容性
 
 | | |
 |---|---|
-| DeepSeek Harness | 桌面版 `0.2.0-rc.2` —— 已实测的主目标 |
+| DeepSeek Harness | 桌面版 `0.2.1-rc.3` —— 1.7.0 已实测（隔离 DSH home 端到端）。1.6.x 及更早按 `0.2.0-rc.2` 写成，在 0.2.1 上忙碌检查失效、子代理会话不删，请升级 |
 | Profile | **desktop：已实测、正式支持。** Web 形态 profile（`dsh web` 浏览器形态）：按设计可用（只用到 Web 面 API，无桌面端专属调用），但**未单独实测——请自行尝试并反馈遇到的问题** |
 | Node | ≥ 18（DSH 运行时自带） |
 | 能力分类 | 界面与体验 |
@@ -242,8 +254,8 @@ dsh plugin --profile desktop remove dsh-session-clean
 ### 技术说明（普通用户可跳过）
 
 - **客户端半** `client.js`：向官方 slot 列表 `sidebar.workspaces.session.menu.item` 注册 `order: 500` 的菜单行（与内置 pin=100 / rename=200 / fork=300 / archive=400 同一列表，官方支持的扩展点）；忙碌状态来自宿主注入的 `useSessionStatus` 快照；确认弹窗挂在框架级 `shell.overlay` 槽位，菜单关闭不会连带销毁。
-- **宿主半** `index.js`：注册私有路由 `/_dsh-session-clean`，先重探会话活动，再按固定顺序删除——① 把仍驻留内存的会话从宿主活动存储中卸载 → ② 从工作区注册表移除（全局归档 / 置顶集 + 各工作区会话列表）→ ③ 清理落盘数据（会话目录、`session_projcache` 投影缓存记录、spill 溢出目录）。注册表写入走它自己已打开的同一个存储域句柄，写即持久化并发变更事件，侧栏据此刷新。
-- **卸载活会话**用的是框架自己的拆除原语 `SessionStore.liveEntryFor(session).detach()`（即属主卸载时执行的同一段 `store.delete` + `session/disposed`）。该事件被会话控制器转成 `api-session/removed`，客户端据此**真的把那一行删掉**，同时关闭该会话的日志写入器，因此对话记录不会被重新落盘。`liveEntryFor` / `detachEntered` 属于内部成员（不在生成的 API catalog 里），所以每一步都先做能力探测，失败就退化为「如实汇报的隐藏」，不做无声的假删除。
+- **宿主半** `index.js`：注册私有路由 `/_dsh-session-clean`（disposer 由 `ctx.effect` 持有，可停用 / 重载），按固定顺序删除——① 用 `sessionPersistence.list()` 的会话头收集子代理子树（`origin: 'subagent'` 沿 `parentSession` 递归），分叉只计数 → ② 对子树每个会话跑官方 `workspace/session-activity`（turn / subagent / job / schedule）并看 `agent.status`，有活动就 409 → ③ `workspaceRegistry.archiveSession(id, { stopActivity })` 停活动、清置顶、冻结会话，带停止时轮询直到活动清空 → ④ 经 schedule 服务删提醒 → ⑤ 仍驻留的会话先 flush 再卸载，从叶到根 → ⑥ `WorkspaceEntity.detachSession` 移出工作区 → ⑦ 删会话目录（取自持久化后端的 `locate` / `root`）、`session_projcache` 记录、spill 目录，均有界重试 → ⑧ 删干净的会话 `unarchiveSession` 清掉归档标记。注册表**只走公开方法**：直接写存储域会被注册表的内存缓存在下一次官方写入时整体覆盖回去。
+- **卸载活会话**用的是框架自己的拆除原语 `SessionStore.liveEntryFor(session).detach()`（即属主卸载时执行的同一段 `store.delete` + `session/disposed`）。该事件被会话控制器转成 `api-session/removed`，客户端据此**真的把那一行删掉**，同时关闭该会话的日志写入器，因此对话记录不会被重新落盘。`liveEntryFor` / `detachEntered` 属于内部成员（不在生成的 API catalog 里），所以每一步都先做能力探测，失败就保持官方归档状态作为「如实汇报的隐藏」（响应 `hidden: true`），不做无声的假删除，重启后由启动清理经 `unarchiveSession` 收尾。
 - **投影缓存为什么必须单独处理**：它是「写回型自愈缓存」，且该域真正的表名是 `sessions`、键是完整会话 id。必须通过活动域删键（而不是只删文件），否则域内存里的那行还在，下一次检查点就会把文件重新写出来。
 - 不修改 `app.asar`，不 patch 任何官方装载行，升级 DSH 不受影响。
 
