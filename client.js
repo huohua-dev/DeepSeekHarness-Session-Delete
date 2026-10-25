@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     // Human-synced copy of package.json#version: client bundles cannot read
     // package.json at runtime. Bump together with `npm version`.
-    const VERSION = '1.7.0'
+    const VERSION = '1.7.1'
 
     const React = require('react')
     const h = React.createElement
@@ -63,6 +63,8 @@ window.__ModuleLoader__.load({
         cleanupConfirmTitle: '清空「{title}」的全部会话？',
         cleanupConfirmDesc: '将永久删除该分组下的 {n} 个会话及其本地数据，删除后无法恢复。',
         cleanupBusyBlocked: '有 {n} 个会话正在运行，已整批取消：请等它们结束再来',
+        cleanupBusyStop: '有 {n} 个会话仍有进行中的工作（{kinds}），整批没有删除。可以停止它们再删。',
+        stopAndRemove: '停止并移除分组',
         cleanupPrecheckFailed: '预检请求失败，未删除任何会话：{message}',
         cleanupFailedItems: '失败的会话：{items}',
         cleanupRemoveSkipped: '有 {m} 个会话没删成功，分组先保留，没有移除。',
@@ -112,6 +114,8 @@ window.__ModuleLoader__.load({
         cleanupConfirmTitle: 'Delete every session in “{title}”?',
         cleanupConfirmDesc: 'This permanently deletes the {n} session(s) in that workspace and their local data. It cannot be undone.',
         cleanupBusyBlocked: '{n} session(s) are running, so the whole batch was cancelled — try again once they finish',
+        cleanupBusyStop: '{n} session(s) still have work in progress ({kinds}); nothing was deleted. You can stop them and delete.',
+        stopAndRemove: 'Stop and remove group',
         cleanupPrecheckFailed: 'The pre-flight request failed; nothing was deleted: {message}',
         cleanupFailedItems: 'Failed sessions: {items}',
         cleanupRemoveSkipped: '{m} session(s) could not be deleted, so the group was kept.',
@@ -225,14 +229,14 @@ window.__ModuleLoader__.load({
      * Delete a batch one session at a time, collecting every failure.
      * @returns {Promise<{ok: number, hidden: number, failed: Array<{sessionId: string, error: string}>}>}
      */
-    async function deleteSerially(fetchImpl, sessionIds, onProgress) {
+    async function deleteSerially(fetchImpl, sessionIds, onProgress, { stopActivity = false } = {}) {
       let ok = 0
       let hidden = 0
       const failed = []
       for (let index = 0; index < sessionIds.length; index += 1) {
         const sessionId = sessionIds[index]
         try {
-          const result = await postJson(fetchImpl, '/delete', { sessionId })
+          const result = await postJson(fetchImpl, '/delete', stopActivity ? { sessionId, stopActivity: true } : { sessionId })
           if (result.ok && result.payload?.ok === true) {
             ok += 1
             if (result.payload.hidden === true) hidden += 1
@@ -247,8 +251,19 @@ window.__ModuleLoader__.load({
       return { ok, hidden, failed }
     }
 
-    /** Only top-level ids cross the wire; subagent children go with their root. */
-    const TOP_LEVEL_RE = /^session-[0-9a-fA-F-]{36}$/
+    /**
+     * Only top-level ids cross the wire: a subagent child is deleted with its
+     * root. Which ids are children comes from the session list itself
+     * (`origin === 'subagent'`), NEVER from the id's shape — DSH stores any
+     * explicit id verbatim (e.g. connector sessions named `od-<uuid>`).
+     * @param {string[]} sessionIds - a group's members.
+     * @param {Iterable<string>} subagentIds - ids the sidebar marks as subagent children.
+     * @returns {string[]} the members to send.
+     */
+    const selectTopLevel = (sessionIds, subagentIds) => {
+      const children = new Set(subagentIds ?? [])
+      return (sessionIds ?? []).filter((sessionId) => typeof sessionId === 'string' && sessionId !== '' && !children.has(sessionId))
+    }
 
     /** "Clean and remove group" may only unregister a group that is really empty now. */
     const shouldRemoveGroup = (result) => result !== null && Array.isArray(result.failed) && result.failed.length === 0
@@ -546,6 +561,8 @@ window.__ModuleLoader__.load({
       statuses: null,
       /** @type {string[]} sessions owned by no workspace (the "Ungrouped" bucket) */
       ungroupedSessionIds: [],
+      /** @type {string[]} ids the sidebar reports as subagent children */
+      subagentSessionIds: [],
     }
     const cleanupBridgeListeners = new Set()
 
@@ -619,9 +636,14 @@ window.__ModuleLoader__.load({
       const total = workspaces.reduce((count, workspace) => count + (workspace?.sessionIds?.length ?? 0), 0) +
         ungroupedSessionIds.length
 
+      const subagentSessionIds = Object.values(summaries ?? {})
+        .filter((summary) => summary !== null && typeof summary === 'object' && summary.origin === 'subagent')
+        .map((summary) => summary.sessionId)
+
       // Publish the live view for the overlay panel (it has no hooks).
       React.useEffect(() => {
         publishCleanup({
+          subagentSessionIds,
           workspaces: workspaces.map((workspace) => {
             const sessionIds = [...(workspace.sessionIds ?? [])]
             return {
@@ -663,6 +685,8 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [toast, setToast] = React.useState(null)
+      // Activity the pre-flight found: the second click stops it and deletes.
+      const [busy, setBusy] = React.useState(null)
 
       React.useEffect(() => {
         if (toast === null) return
@@ -675,6 +699,7 @@ window.__ModuleLoader__.load({
           setTarget(null)
           setProgress(null)
           setError(null)
+          setBusy(null)
         }
       }, [bridge.open])
 
@@ -719,11 +744,13 @@ window.__ModuleLoader__.load({
        * Delete one batch serially behind the whole-batch idle gate. Only
        * top-level ids are sent: subagent children go with their root.
        * @param {string[]} sessionIds - every member to delete.
-       * @returns {Promise<{ok: number, failed: Array<{sessionId: string, error: string}>, openDeleted: boolean} | null>} null when refused.
+       * @param {string[]} sessionIds - every member to delete.
+       * @param {{ stopActivity?: boolean }} options - stop the members' work first (second confirmation).
+       * @returns {Promise<{ok: number, failed: Array<{sessionId: string, error: string}>, openDeleted: boolean} | {refused: true} | null>} null when the pre-flight itself failed.
        */
-      const deleteBatch = async (sessionIds) => {
+      const deleteBatch = async (sessionIds, { stopActivity = false } = {}) => {
         setError(null)
-        const ids = sessionIds.filter((sessionId) => TOP_LEVEL_RE.test(sessionId))
+        const ids = selectTopLevel(sessionIds, bridge.subagentSessionIds)
         // Read the main-view retain counts BEFORE deleting: an unload clears
         // them, so afterwards there is no way to tell whether the conversation
         // on screen was part of this batch.
@@ -740,12 +767,17 @@ window.__ModuleLoader__.load({
           setError(t('cleanupPrecheckFailed', { message: precheck.message }))
           return null
         }
-        if (precheck.kind === 'busy') {
-          setError(t('cleanupBusyBlocked', { n: precheck.busy.length }))
-          return null
+        if (precheck.kind === 'busy' && !stopActivity) {
+          // Grounded refusal: name what is running and offer the stopping run
+          // (a pending reminder would otherwise block a group forever).
+          setBusy(precheck.busy)
+          const members = precheck.busy.flatMap((entry) => (Array.isArray(entry?.active) ? entry.active : []))
+          setError(t('cleanupBusyStop', { n: precheck.busy.length, kinds: describeActivity(members, t) }))
+          return { refused: true }
         }
+        if (precheck.kind === 'busy') setBusy(precheck.busy)
         setProgress({ done: 0, total: ids.length })
-        const result = await deleteSerially(fetch, ids, (done, total) => setProgress({ done, total }))
+        const result = await deleteSerially(fetch, ids, (done, total) => setProgress({ done, total }), { stopActivity })
         refreshSessions()
         setProgress(null)
         if (result.failed.length === 0) setToast(t('cleanupDone', { n: result.ok }))
@@ -757,9 +789,9 @@ window.__ModuleLoader__.load({
       }
 
       /** Manual panel: clean one live workspace. */
-      const cleanWorkspace = async (workspace) => {
-        const result = await deleteBatch([...(workspace?.sessionIds ?? [])])
-        if (result === null) return
+      const cleanWorkspace = async (workspace, stopActivity = false) => {
+        const result = await deleteBatch([...(workspace?.sessionIds ?? [])], { stopActivity })
+        if (result === null || result.refused === true) return
         if (result.failed.length === 0) {
           setTarget(null)
           publishCleanup({ open: false })
@@ -781,9 +813,9 @@ window.__ModuleLoader__.load({
        * There is no workspace to land in, so the view falls back to the first
        * remaining workspace.
        */
-      const cleanUngrouped = async (sessionIds) => {
-        const result = await deleteBatch([...sessionIds])
-        if (result === null) return
+      const cleanUngrouped = async (sessionIds, stopActivity = false) => {
+        const result = await deleteBatch([...sessionIds], { stopActivity })
+        if (result === null || result.refused === true) return
         if (result.failed.length === 0) {
           setTarget(null)
           publishCleanup({ open: false })
@@ -798,9 +830,9 @@ window.__ModuleLoader__.load({
        * KEPT: removing it would spill the survivors into Ungrouped.
        * @param {{workspaceId: string, title?: string, path?: string, sessionIds: string[]}} workspace - target group.
        */
-      const cleanWorkspaceAndRemove = async (workspace) => {
-        const result = await deleteBatch([...(workspace?.sessionIds ?? [])])
-        if (result === null) return
+      const cleanWorkspaceAndRemove = async (workspace, stopActivity = false) => {
+        const result = await deleteBatch([...(workspace?.sessionIds ?? [])], { stopActivity })
+        if (result === null || result.refused === true) return
         if (!shouldRemoveGroup(result)) {
           setError(`${t('cleanupRemoveSkipped', { m: result.failed.length })}\n${t('cleanupFailedItems', { items: describeFailures(result.failed) })}`)
           if (result.openDeleted) openFirstAliveWorkspace(workspace.workspaceId)
@@ -872,7 +904,7 @@ window.__ModuleLoader__.load({
                           className: 'dsh-sd-mini',
                           disabled: busy > 0 || progress !== null,
                           title: busy > 0 ? t('cleanupBusyBlocked', { n: busy }) : undefined,
-                          onClick: () => { setError(null); setTarget(workspace) },
+                          onClick: () => { setError(null); setBusy(null); setTarget(workspace) },
                         }, t('cleanupAction')),
                       )
                     }),
@@ -907,6 +939,7 @@ window.__ModuleLoader__.load({
                           : undefined,
                         onClick: () => {
                           setError(null)
+                          setBusy(null)
                           setTarget({ ungrouped: true, title: t('cleanupUngrouped'), sessionIds: ungroupedIds })
                         },
                       }, t('cleanupAction')),
@@ -945,16 +978,18 @@ window.__ModuleLoader__.load({
                     ? null
                     : h('button', {
                       type: 'button', className: 'dsh-sd-btn', disabled: progress !== null,
-                      onClick: () => { if (progress === null) void cleanWorkspaceAndRemove(target) },
-                    }, progress !== null ? t('deleting') : t('cleanupActionRemove')),
+                      onClick: () => {
+                        if (progress === null) void cleanWorkspaceAndRemove(target, busy !== null)
+                      },
+                    }, progress !== null ? t('deleting') : busy !== null ? t('stopAndRemove') : t('cleanupActionRemove')),
                   h('button', {
                     type: 'button', className: 'dsh-sd-btn', 'data-danger': true, disabled: progress !== null,
                     onClick: () => {
                       if (progress !== null) return
-                      if (target?.ungrouped === true) void cleanUngrouped(target.sessionIds ?? [])
-                      else void cleanWorkspace(target)
+                      if (target?.ungrouped === true) void cleanUngrouped(target.sessionIds ?? [], busy !== null)
+                      else void cleanWorkspace(target, busy !== null)
                     },
-                  }, progress !== null ? t('deleting') : t('confirmAction')),
+                  }, progress !== null ? t('deleting') : busy !== null ? t('stopAndDelete') : t('confirmAction')),
                 ),
               ),
           ),
@@ -965,7 +1000,7 @@ window.__ModuleLoader__.load({
 
     return {
       // Pure helpers for tools/smoke-client.mjs; the plugin loader reads only inject/apply.
-      __internals: { precheckBatch, deleteSerially, shouldRemoveGroup, describeFailures, describeActivity, TOP_LEVEL_RE },
+      __internals: { precheckBatch, deleteSerially, shouldRemoveGroup, describeFailures, describeActivity, selectTopLevel },
       inject: ['slots', 'locale'],
       apply(ctx) {
         ensureStyles()

@@ -19,6 +19,7 @@
 //   12 async log, rotation past 1 MiB, no titles
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync, statSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
+import { zstdCompressSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -68,6 +69,7 @@ function addSession(id, { parentSession, origin, isSeeded = false, workspace = t
     ...(origin ? { origin, delegationDepth: 1 } : {}),
   }
   headers.set(id, header)
+  registry.knownIds.add(id)
   mkdirSync(dirOf(id), { recursive: true })
   writeFileSync(join(dirOf(id), 'session.v4.jsonl.zstd'), 'payload')
   writeFileSync(join(PROJCACHE, `${id}.json`), '{}')
@@ -76,6 +78,29 @@ function addSession(id, { parentSession, origin, isSeeded = false, workspace = t
   writeFileSync(join(spillOf(id), 'r.txt'), 'spilled')
   if (workspace) wsRecord().sessionIds.unshift(id)
   if (live) resident.set(id, { id, header })
+  emit('session/created', { id, header })
+  return id
+}
+
+/**
+ * Same artefacts as {@link addSession}, but WITHOUT the `session/created`
+ * event — models a session another process/connector put on disk while this
+ * Host was running, which is exactly what the freshness rule must survive.
+ */
+function addSilentSession(id, { parentSession, origin, isSeeded = false, workspace = false } = {}) {
+  const header = {
+    type: 'session', version: 4, id, cwd: WORK, createdAt: Date.now(), isSeeded,
+    ...(parentSession ? { parentSession } : {}),
+    ...(origin ? { origin, delegationDepth: 1 } : {}),
+  }
+  headers.set(id, header)
+  mkdirSync(dirOf(id), { recursive: true })
+  writeFileSync(join(dirOf(id), 'session.v4.jsonl.zstd'), 'payload')
+  writeFileSync(join(PROJCACHE, `${id}.json`), '{}')
+  projcache.set(id, {})
+  mkdirSync(spillOf(id), { recursive: true })
+  writeFileSync(join(spillOf(id), 'r.txt'), 'spilled')
+  if (workspace) wsRecord().sessionIds.unshift(id)
   return id
 }
 
@@ -85,9 +110,18 @@ const goneOnDisk = (id) =>
 const intactOnDisk = (id) =>
   existsSync(dirOf(id)) && existsSync(join(PROJCACHE, `${id}.json`)) && projcache.has(id) && existsSync(spillOf(id))
 
-// ---- events: waterfall / parallel, as the cordis context exposes them ------
+// ---- events: waterfall / parallel / on, as the cordis context exposes them --
 const listeners = { 'workspace/session-activity': [], 'workspace/session-stop': [] }
 const on = (name, fn) => listeners[name].push(fn)
+/** Plain `ctx.on` subscriptions (session/created, session/disposed…). */
+const subscriptions = new Map()
+const subscribe = (name, fn) => {
+  const list = subscriptions.get(name) ?? []
+  list.push(fn)
+  subscriptions.set(name, list)
+  return () => subscriptions.set(name, (subscriptions.get(name) ?? []).filter((f) => f !== fn))
+}
+const emit = (name, arg) => { for (const fn of subscriptions.get(name) ?? []) fn(arg) }
 async function waterfall(name, arg, fallback) {
   const chain = listeners[name] ?? []
   const run = (index) => (index < chain.length ? chain[index](arg, () => run(index + 1)) : fallback())
@@ -190,7 +224,7 @@ const sessionStore = {
     for (const [id, s] of resident) if (s === session) return { id, session }
     throw new Error(`session "${session?.id}" is not live in this store`)
   },
-  detachEntered(entry) { resident.delete(entry.id); calls.push(`detach:${entry.id}`) },
+  detachEntered(entry) { resident.delete(entry.id); calls.push(`detach:${entry.id}`); emit('session/disposed', entry.session) },
 }
 const strippedStore = { get: sessionStore.get, list: sessionStore.list, flush: sessionStore.flush }
 
@@ -198,8 +232,11 @@ const strippedStore = { get: sessionStore.get, list: sessionStore.list, flush: s
 const persistence = {
   root: ROOT,
   emptyListing: false,
+  /** When set, `list()` rejects the way one corrupt log makes the backend listing fail. */
+  failure: null,
   async list() {
     listCalls += 1
+    if (this.failure !== null) throw new Error(this.failure)
     return this.emptyListing ? [] : [...headers.values()].map((header) => ({ header }))
   },
   locate(header) { return { kind: 'jsonl', path: join(ROOT, projectKey(header.cwd), header.id, 'session.v4.jsonl.zstd') } },
@@ -218,7 +255,9 @@ const registry = {
   get pinnedSessionIds() { return this.state.pinnedSessionIds },
   list() { return [...this.entities.values()] },
   get(id) { return this.entities.get(id) },
-  known: (id) => resident.has(id) || headers.has(id),
+  /** The registry's own header cache (built at startup) — independent of a broken listing. */
+  knownIds: new Set(),
+  known: (id) => resident.has(id) || registry.knownIds.has(id) || headers.has(id),
   archiveSession(id, options = {}) {
     return this.queue(async () => {
       calls.push(`archive:${id}:${options.stopActivity === true}`)
@@ -319,12 +358,13 @@ function makeCtx(overrides = {}) {
   return {
     get: (key) => services()[key],
     waterfall, parallel,
+    on: subscribe,
     effect(fn) { const d = fn(); if (typeof d === 'function') disposers.push(d); return d },
     dispose() { while (disposers.length) disposers.pop()() },
   }
 }
 
-const OPTIONS = { stopTimeoutMs: 400, stopPollMs: 20, removeAttempts: 5, removeRetryMs: 60, residualPurgeMs: 120, headerCacheMs: 0 }
+const OPTIONS = { stopTimeoutMs: 400, stopPollMs: 20, removeAttempts: 5, removeRetryMs: 60, residualPurgeMs: 120, headerCacheMs: 5000 }
 const mod = await import('../index.js')
 
 function call(method, url, body, { contentType = 'application/json' } = {}) {
@@ -387,8 +427,16 @@ const check = (label, ok, detail) => {
   mod.apply(makeCtx(), OPTIONS)
   check('[10] POST without application/json → 415', (await call('POST', '/_dsh-session-clean/delete', { sessionId: id }, { contentType: 'text/plain' })).status === 415)
   check('[10] POST with a non-object JSON body → 400', (await call('POST', '/_dsh-session-clean/delete', '[1]')).status === 400)
-  check('[10] a bare uuid is not accepted over HTTP', (await del(bare())).status === 400)
-  check('[10] a malformed id is rejected', (await del('rm -rf /')).status === 400)
+  // Ids are not required to look like `session-<uuid>`: DSH stores whatever
+  // explicit id a caller passed (e.g. connector sessions named `od-<uuid>`),
+  // so only PATH SAFETY is enforced.
+  check('[10] a bare uuid is accepted (subagent ids are safe ids)', (await del(bare())).status === 200)
+  check('[10] a custom-prefix id is accepted', (await del('od-' + bare())).status === 200)
+  for (const bad of ['rm -rf /', '../evil', 'a/b', 'a\\b', '.', '..', '', 'x'.repeat(201), 'has space', 'null\u0000byte']) {
+    const rejected = (await del(bad)).status === 400
+    if (!rejected) check(`[10] unsafe id rejected: ${JSON.stringify(bad.slice(0, 20))}`, false, 'status != 400')
+  }
+  check('[10] unsafe ids (separators, dot segments, over-long, spaces, NUL) are rejected', true)
   check('[4] GET precheck is gone (405)', (await call('GET', `/_dsh-session-clean/precheck?sessionIds=${id}`)).status === 405)
 }
 
@@ -541,6 +589,76 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
 }
 
 /* ------------------------------------------------------------------------ *
+ * the header snapshot must not hide a subtree that appeared a moment ago
+ * ------------------------------------------------------------------------ */
+{
+  const S1 = top()
+  const S1_CHILD = bare()
+  // Both appear WITHOUT a session/created event and after the snapshot is warm:
+  // the only way to see them is the freshness rule for an id the cache lacks.
+  addSilentSession(S1)
+  addSilentSession(S1_CHILD, { parentSession: S1, origin: 'subagent' })
+  const first = await call('GET', `/_dsh-session-clean/status?sessionId=${top()}`) // warms the cache with neither
+  const st = await call('GET', `/_dsh-session-clean/status?sessionId=${S1}`)
+  check('freshness: an unknown id re-lists, so its whole subtree is seen', first.status === 200 && st.body.subagents === 1, `subagents=${st.body.subagents}`)
+  const res = await del(S1)
+  check('freshness: and it is deleted with its parent', res.body.deleted.length === 2 && goneOnDisk(S1_CHILD), JSON.stringify(res.body.deleted))
+}
+
+/* ------------------------------------------------------------------------ *
+ * non-standard session ids (regression: `od-<uuid>` connector sessions)
+ * ------------------------------------------------------------------------ */
+{
+  const O = 'od-' + bare()
+  const O_CHILD = bare()
+  addSession(O, { live: true })
+  addSession(O_CHILD, { parentSession: O, origin: 'subagent' })
+  emit('session/created', { id: O }) // keep the snapshot warm-correct
+  const st = await call('GET', `/_dsh-session-clean/status?sessionId=${O}`)
+  check('custom-id session: status counts its subagent child', st.status === 200 && st.body.subagents === 1, JSON.stringify(st.body))
+  const res = await del(O)
+  check('custom-id session: delete succeeds with its subtree', res.status === 200 && res.body.ok === true && res.body.deleted.length === 2, JSON.stringify(res.body))
+  check('custom-id session: payload + cache gone', goneOnDisk(O) && goneOnDisk(O_CHILD) && !wsRecord().sessionIds.includes(O))
+  const pre = await call('POST', '/_dsh-session-clean/precheck', { sessionIds: ['od-' + bare(), top()] })
+  check('custom-id session: pre-flight accepts mixed id shapes', pre.status === 200 && pre.body.ok === true)
+}
+
+/* ------------------------------------------------------------------------ *
+ * degraded header index: sessionPersistence.list() rejects (one corrupt log)
+ * ------------------------------------------------------------------------ */
+{
+  const P = `od-${bare()}`
+  const P_CHILD = bare()
+  // Real on-disk artefacts: the fallback parses the first (header) frame.
+  const write = (id, header) => {
+    mkdirSync(dirOf(id), { recursive: true })
+    writeFileSync(join(dirOf(id), 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(JSON.stringify({ type: 'session', version: 4, ...header }) + '\n')))
+  }
+  write(P, { id: P, cwd: WORK, createdAt: Date.now(), isSeeded: false })
+  write(P_CHILD, { id: P_CHILD, cwd: WORK, createdAt: Date.now(), parentSession: P, origin: 'subagent', delegationDepth: 1, isSeeded: true })
+  persistence.failure = 'corrupt session log "/x/y/session.v4.jsonl.zstd"'
+  registry.knownIds.add(P); registry.knownIds.add(P_CHILD)
+  const st = await call('GET', `/_dsh-session-clean/status?sessionId=${P}`)
+  check('degraded index: status still answers and finds the subagent subtree', st.status === 200 && st.body.subagents === 1, JSON.stringify(st.body))
+  const res = await del(P)
+  check('degraded index: delete still works through the scan fallback', res.status === 200 && res.body.ok === true && res.body.deleted.length === 2, JSON.stringify(res.body))
+  check('degraded index: both session dirs removed', !existsSync(dirOf(P)) && !existsSync(dirOf(P_CHILD)))
+  // Second case: the registry does not know the session either (created after
+  // startup) while the listing is broken — deletion must still go through, and
+  // say the freeze step was skipped instead of pretending it happened.
+  const Q = `od-${bare()}`
+  write(Q, { id: Q, cwd: WORK, createdAt: Date.now(), isSeeded: false })
+  persistence.failure = 'corrupt session log "/x/y/session.v4.jsonl.zstd"'
+  const res2 = await del(Q)
+  check('degraded index: unknown-to-registry session still deletes and reports archiveSkipped',
+    res2.status === 200 && res2.body.deleted.includes(Q) && Array.isArray(res2.body.archiveSkipped) && res2.body.archiveSkipped.length === 1,
+    JSON.stringify(res2.body))
+  persistence.failure = null
+  const ok = await call('GET', `/_dsh-session-clean/status?sessionId=${top()}`)
+  check('degraded index: recovers once the backend listing works again', ok.status === 200)
+}
+
+/* ------------------------------------------------------------------------ *
  * ghost entry: registry markers without any stored session
  * ------------------------------------------------------------------------ */
 {
@@ -570,7 +688,8 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
   check('[4] 5000 ids over 3000 headers pre-flight in bounded time', full.status === 200 && full.body.total === 5000 && elapsed < 5000, `${elapsed}ms status=${full.status}`)
   check('[4] 5001 ids → 413', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: Array.from({ length: 5001 }, top) })).status === 413)
   check('[4] empty → 400', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: [] })).status === 400)
-  check('[4] malformed member → 400', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: ['x'] })).status === 400)
+  check('[4] unsafe member (path traversal) → 400', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: ['../x'] })).status === 400)
+  check('[4] a short custom id is a valid member', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: ['x'] })).status === 200)
   agents.get(BUSY).status = 'idle'
 }
 

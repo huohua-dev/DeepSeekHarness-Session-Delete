@@ -51,7 +51,8 @@
 import { homedir, tmpdir } from 'node:os'
 import { join, dirname, relative, isAbsolute, sep } from 'node:path'
 import { createHash } from 'node:crypto'
-import { rm, readdir, mkdir, appendFile, stat, rename } from 'node:fs/promises'
+import { rm, readdir, mkdir, appendFile, stat, rename, readFile } from 'node:fs/promises'
+import { zstdDecompressSync } from 'node:zlib'
 import { existsSync } from 'node:fs'
 
 const TAG = '[session-delete]'
@@ -87,10 +88,18 @@ const DEFAULTS = {
   headerCacheMs: 30000,
 }
 
-/** Top-level session id accepted over HTTP. */
-const SESSION_ID_RE = /^session-[0-9a-fA-F-]{36}$/
-/** Any id that may appear inside a subtree: top-level, or a subagent's bare uuid. */
-const MEMBER_ID_RE = /^(?:session-)?[0-9a-fA-F-]{36}$/
+/**
+ * Session ids accepted over HTTP and followed inside a subtree. DSH does NOT
+ * require a shape: \`session-<uuid>\` and a subagent's bare uuid are the
+ * common cases, but any explicit id a caller passes to \`session/create\` is
+ * stored verbatim (observed in the wild: \`od-<uuid>\` sessions minted by a
+ * connector). What matters is that the id is safe to use as ONE path segment —
+ * no separators, no dot-only segments — because it is joined into the session
+ * root and compared against the basename of a located directory.
+ */
+const SESSION_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,199}$/
+/** Subtree members are ids of the same kind (children are usually bare uuids). */
+const MEMBER_ID_RE = SESSION_ID_RE
 
 /** DSH home, for the fallback locations only; tests redirect it. */
 const dshHome = () => {
@@ -254,19 +263,34 @@ async function unloadLiveSession(ctx, sessionId) {
 function createHeaderIndex(ctx, cacheMs) {
   let cached
   return {
+    /** True when the last load had to guess because the backend listing failed. */
+    degraded: false,
     /** @returns {Promise<Map<string, object>>} id → header. */
     async load({ fresh = false } = {}) {
       const persistence = serviceOf(ctx, 'sessionPersistence')
       if (typeof persistence?.list !== 'function') throw httpError(503, '会话持久化服务不可用，无法确认要删除的范围')
       if (fresh || cached === undefined || Date.now() - cached.at > cacheMs) {
-        const snapshots = await persistence.list()
-        const stored = new Map()
-        for (const snapshot of snapshots ?? []) {
-          const header = snapshot?.header
-          if (typeof header?.id === 'string') stored.set(header.id, header)
+        let stored
+        let degraded = false
+        try {
+          const snapshots = await persistence.list()
+          stored = new Map()
+          for (const snapshot of snapshots ?? []) {
+            const header = snapshot?.header
+            if (typeof header?.id === 'string') stored.set(header.id, header)
+          }
+        } catch (error) {
+          // ONE unreadable log makes the whole backend listing reject, which
+          // would take deletion down with it. Fall back to reading header
+          // frames straight from the persistence root so the user can still
+          // delete (the tree is rebuilt from the same fields the listing uses).
+          degraded = true
+          void opLog(`persistence listing failed, using header scan: ${messageOf(error)}`)
+          stored = await scanStoredHeaders(sessionsRoot(ctx))
         }
-        cached = { at: Date.now(), stored }
+        cached = { at: Date.now(), stored, degraded }
       }
+      this.degraded = cached.degraded === true
       const headers = new Map(cached.stored)
       const sessions = serviceOf(ctx, 'sessions')
       try {
@@ -283,7 +307,72 @@ function createHeaderIndex(ctx, cacheMs) {
       if (cached === undefined) return
       for (const id of ids) cached.stored.delete(id)
     },
+    /** Drop the snapshot so the next load re-lists (a session appeared or went away). */
+    invalidate() {
+      cached = undefined
+      this.degraded = false
+    },
   }
+}
+
+/**
+ * Best-effort header index read straight from the persistence root, used only
+ * when `sessionPersistence.list()` rejects (one corrupt or foreign log makes
+ * the whole listing fail). Each session directory's highest canonical
+ * generation is decompressed far enough to parse its first line; anything
+ * unreadable is skipped, and `id` must match the directory name.
+ * @param {string} root - the persistence root.
+ * @returns {Promise<Map<string, object>>} id → header.
+ */
+async function scanStoredHeaders(root) {
+  const headers = new Map()
+  let projects
+  try {
+    projects = await readdir(root)
+  } catch {
+    return headers
+  }
+  for (const project of projects) {
+    let ids
+    try {
+      ids = await readdir(join(root, project))
+    } catch {
+      continue
+    }
+    for (const id of ids) {
+      if (!MEMBER_ID_RE.test(id)) continue
+      const header = await readStoredHeader(join(root, project, id), id)
+      if (header !== undefined) headers.set(id, header)
+    }
+  }
+  return headers
+}
+
+/** @returns {Promise<object|undefined>} the newest readable header of one session dir. */
+async function readStoredHeader(dir, id) {
+  let names
+  try {
+    names = await readdir(dir)
+  } catch {
+    return undefined
+  }
+  const generations = names
+    .map((name) => ({ name, version: Number(/\.v(\d+)\./.exec(name)?.[1] ?? 0) }))
+    .filter((entry) => /^session(\.[A-Za-z0-9]+)*\.jsonl(\.zstd)?$/.test(entry.name))
+    .sort((left, right) => right.version - left.version)
+  for (const { name } of generations) {
+    try {
+      const raw = await readFile(join(dir, name))
+      // The header is its own frame, so decompressing the buffer yields it first.
+      const text = name.endsWith('.zstd') ? zstdDecompressSync(raw).toString('utf8') : raw.toString('utf8')
+      const end = text.indexOf('\n')
+      const header = JSON.parse(end < 0 ? text : text.slice(0, end))
+      if (header?.id === id) return header
+    } catch {
+      /* try the next generation */
+    }
+  }
+  return undefined
 }
 
 const isSubagentHeader = (header) => header?.origin === 'subagent' && typeof header?.parentSession === 'string'
@@ -606,6 +695,19 @@ async function eraseReminders(ctx, members, errors) {
  * ------------------------------------------------------------------------ */
 
 /**
+ * Header index fresh enough for one operation: the cached snapshot is reused
+ * for the bulk path, but an id it does not know (a session created seconds ago,
+ * a subagent that just spawned) buys exactly one fresh listing — a subtree is
+ * only complete if the snapshot is.
+ * @returns {Promise<Map<string, object>>} id → header.
+ */
+async function loadHeadersFor(ctx, state, sessionId) {
+  const cachedHeaders = await state.headers.load()
+  if (cachedHeaders.has(sessionId) || isResident(ctx, sessionId)) return cachedHeaders
+  return await state.headers.load({ fresh: true })
+}
+
+/**
  * Delete one top-level session and its subagent subtree. See the module
  * comment for the order.
  * @returns {Promise<{status: number, body: object}>}
@@ -613,7 +715,7 @@ async function eraseReminders(ctx, members, errors) {
 async function deleteSession(ctx, state, rootId, stopActivity) {
   const { options } = state
   const registry = registryOf(ctx)
-  const headers = await state.headers.load()
+  const headers = await loadHeadersFor(ctx, state, rootId)
   const rootKnown = headers.has(rootId) || isResident(ctx, rootId)
   const { members, forks } = collectSubtree(headers, rootId)
   const known = members.filter((id) => headers.has(id) || isResident(ctx, id))
@@ -643,10 +745,22 @@ async function deleteSession(ctx, state, rootId, stopActivity) {
       try { await registry.pinSession?.(id) } catch { /* best effort */ }
     }
   }
+  const archiveSkipped = []
   try {
     for (const id of known) {
-      await registry.archiveSession(id, { stopActivity })
-      if (!preArchived.has(id)) archivedByUs.push(id)
+      try {
+        await registry.archiveSession(id, { stopActivity })
+        if (!preArchived.has(id)) archivedByUs.push(id)
+      } catch (error) {
+        // The registry refuses ids it cannot confirm exist. When the session
+        // backend's listing is broken (the degraded header scan) that check can
+        // reject for a session that IS there — refuse everything and nobody can
+        // ever delete. Degrade instead of blocking: log it and report the
+        // member as un-frozen rather than pretending it was frozen.
+        if (!state.headers.degraded) throw error
+        archiveSkipped.push({ sessionId: id, message: messageOf(error) })
+        void opLog(`archive skipped (degraded listing) ${id}: ${messageOf(error)}`)
+      }
     }
   } catch (error) {
     await rollback()
@@ -754,6 +868,7 @@ async function deleteSession(ctx, state, rootId, stopActivity) {
       reminders,
       unloaded,
       resident: stillResident,
+      ...(archiveSkipped.length === 0 ? {} : { archiveSkipped }),
       live: stillResident.includes(rootId),
       hidden,
       forksKept: forks.length,
@@ -778,6 +893,10 @@ async function pruneDanglingIds(ctx, state) {
   const root = sessionsRoot(ctx)
   if (!existsSync(root)) return 0
   const headers = await state.headers.load({ fresh: true })
+  if (state.headers.degraded) {
+    void opLog('startup prune skipped: session listing is degraded')
+    return 0
+  }
   if (headers.size === 0) return 0
   let dropped = 0
   for (const id of archived) {
@@ -826,7 +945,7 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
-const requireTopLevel = (sessionId) => {
+const requireSessionId = (sessionId) => {
   if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) throw httpError(400, '非法的 sessionId')
   return sessionId
 }
@@ -893,8 +1012,8 @@ export function apply(ctx, config = {}) {
     try {
       if (route === '/status') {
         if (req.method !== 'GET') throw httpError(405, '只支持 GET')
-        const sessionId = requireTopLevel(url.searchParams.get('sessionId') ?? '')
-        const headers = await state.headers.load()
+        const sessionId = requireSessionId(url.searchParams.get('sessionId') ?? '')
+        const headers = await loadHeadersFor(ctx, state, sessionId)
         const { members, forks } = collectSubtree(headers, sessionId)
         const active = await subtreeActivity(ctx, members)
         const rootActivity = active.find((entry) => entry.sessionId === sessionId)?.activity ?? []
@@ -916,7 +1035,7 @@ export function apply(ctx, config = {}) {
         if (!Array.isArray(raw) || raw.length === 0) throw httpError(400, 'sessionIds 不能为空')
         const ids = [...new Set(raw)]
         if (ids.length > PRECHECK_LIMIT) throw httpError(413, `一次最多预检 ${PRECHECK_LIMIT} 个会话`)
-        for (const id of ids) requireTopLevel(id)
+        for (const id of ids) requireSessionId(id)
         const headers = await state.headers.load()
         const sessions = []
         for (let start = 0; start < ids.length; start += PRECHECK_CHUNK) {
@@ -935,7 +1054,7 @@ export function apply(ctx, config = {}) {
       if (route === '/delete') {
         if (req.method !== 'POST') throw httpError(405, '只支持 POST')
         const body = await readJsonBody(req)
-        const sessionId = requireTopLevel(body.sessionId)
+        const sessionId = requireSessionId(body.sessionId)
         const result = await deleteSession(ctx, state, sessionId, body.stopActivity === true)
         if (result.status === 200) {
           log(`已删除会话 ${sessionId}（成员 ${result.body.deleted.length}，路径 ${result.body.removedPaths.length}，错误 ${result.body.errors.length}）`)
@@ -963,6 +1082,15 @@ export function apply(ctx, config = {}) {
       for (const timer of timers) clearTimeout(timer)
       timers.clear()
     }, 'session-delete: timers')
+  }
+
+  // A session that appears or goes away invalidates the header snapshot, so a
+  // bulk pre-flight cannot silently work from a stale tree.
+  if (typeof ctx.on === 'function') {
+    const invalidate = () => state.headers.invalidate()
+    const offCreated = ctx.on('session/created', invalidate)
+    const offDisposed = ctx.on('session/disposed', invalidate)
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => { offCreated?.(); offDisposed?.() }, 'session-delete: header index')
   }
 
   log(`删除接口就绪：${ROUTE_PREFIX}/{status,precheck,delete}`)

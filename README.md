@@ -109,6 +109,7 @@ Until the DSH process exits, an idle Agent object stays in memory — DSH offers
 - **It said "hidden for now" — what does that mean?** That DSH build does not allow a full removal, so the plugin hid the session instead of lying to you. The row disappears for good after you restart DSH.
 - **What if I delete the session I am looking at?** It works; the window is simply empty until you open another session.
 - **Can it damage another conversation?** No. Only files of that session and its subagent sessions are touched; forks and attachments are not.
+- **Does it work for sessions whose id is not `session-…`?** Yes since 1.7.1 — DSH stores whatever id a caller passes (connector sessions like `od-<uuid>` exist), so the plugin validates path safety instead of a UUID shape. 1.7.0 refused them with “invalid sessionId”.
 - **Do I have to restart after deleting?** No.
 - **Does it talk to the internet?** No network calls, no telemetry.
 
@@ -122,7 +123,7 @@ Until the DSH process exits, an idle Agent object stays in memory — DSH offers
 
 | | |
 |---|---|
-| DeepSeek Harness | desktop `0.2.1-rc.3` — tested with 1.7.0 (end to end, isolated DSH home). 1.6.x and older target `0.2.0-rc.2`; on 0.2.1 their busy check never fires and subagent sessions are left behind — please upgrade |
+| DeepSeek Harness | desktop `0.2.1-rc.3` — tested with 1.7.x (end to end, isolated DSH home). 1.6.x and older target `0.2.0-rc.2`; on 0.2.1 their busy check never fires and subagent sessions are left behind — please upgrade |
 | Profile | **desktop: tested and supported.** Web-surface profiles (browser-form `dsh web`): expected to work (only web-surface APIs are used, no desktop-only calls) but **not separately tested — try at your own risk and report back** |
 | Node | ≥ 18 (ships with the DSH runtime) |
 | Capability class | 界面与体验 (UI & experience) |

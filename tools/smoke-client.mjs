@@ -14,7 +14,7 @@ const exportsOf = registration.factory((name) => {
   if (name === 'react') return { createElement: () => null, Fragment: 'fragment' }
   throw new Error(`unexpected require ${name}`)
 })
-const { precheckBatch, deleteSerially, shouldRemoveGroup, describeFailures, describeActivity, TOP_LEVEL_RE } = exportsOf.__internals
+const { precheckBatch, deleteSerially, shouldRemoveGroup, describeFailures, describeActivity, selectTopLevel } = exportsOf.__internals
 
 const checks = []
 const check = (label, ok, detail) => {
@@ -52,6 +52,9 @@ check('client exposes the helpers and keeps inject/apply', typeof exportsOf.appl
   const result = await deleteSerially(async (url, init) => outcome.get(JSON.parse(init.body).sessionId) ?? reply(200, { ok: true, deleted: [], hidden: false }), ids(3), (done, total) => progress.push(`${done}/${total}`))
   check('[8] serial delete counts successes and collects each failure', result.ok === 1 && result.failed.length === 2 && result.failed[0].error === 'session-dir: EBUSY')
   check('[8] progress reported per session', progress.join(',') === '1/3,2/3,3/3')
+  const bodies = []
+  await deleteSerially(async (url, init) => { bodies.push(JSON.parse(init.body)); return reply(200, { ok: true, deleted: [] }) }, ids(2), undefined, { stopActivity: true })
+  check('[1] the batch stopping run asks the Host to stop activity', bodies.every((b) => b.stopActivity === true))
   check('[8] any failure keeps the group (no removal)', shouldRemoveGroup(result) === false)
   check('[8] a clean batch allows removal', shouldRemoveGroup({ ok: 3, failed: [] }) === true && shouldRemoveGroup(null) === false)
   check('[8] failures are listed for the user', describeFailures(result.failed).includes('EBUSY'))
@@ -59,7 +62,15 @@ check('client exposes the helpers and keeps inject/apply', typeof exportsOf.appl
 {
   const t = (key) => key
   check('activity kinds are named', describeActivity([{ activity: [{ kind: 'turn' }, { kind: 'job' }] }, { activity: [{ kind: 'schedule' }] }], t) === 'kindTurn、kindJob、kindSchedule')
-  check('only top-level ids are sent; subagent uuids ride with their root', TOP_LEVEL_RE.test(ids(1)[0]) && !TOP_LEVEL_RE.test('8a7bf4fb-cc0d-4f2c-a11c-164ad20a71c4'))
+  // a precheck `busy` entry nests its members under `active`
+  const busyEntries = [{ sessionId: 'a', active: [{ sessionId: 'a', activity: [{ kind: 'schedule' }] }] }]
+  check('precheck busy entries flatten before describing (the wording cannot end up empty)',
+    describeActivity(busyEntries.flatMap((entry) => entry.active), t) === 'kindSchedule')
+  const child = '8a7bf4fb-cc0d-4f2c-a11c-164ad20a71c4'
+  const sent = selectTopLevel(['session-' + 'a'.repeat(8) + '-0000-4000-8000-000000000000', 'od-166881ad-7e33-40ff-a0ea-2e1bbeddc012', child, '', undefined], [child])
+  check('subagent children ride with their root, whatever the id shape',
+    sent.length === 2 && sent.includes('od-166881ad-7e33-40ff-a0ea-2e1bbeddc012') && !sent.includes(child), JSON.stringify(sent))
+  check('child detection comes from the session list, not from the id prefix', selectTopLevel(['session-x'], []).length === 1)
 }
 
 const failed = checks.filter((ok) => !ok).length
