@@ -6,10 +6,10 @@
  * in — so "Delete session" appears in every session's "…" menu at order 500
  * (after archive), including archived rows.
  *
- * The row greys itself while the session owns live work by selecting from the
- * host-provided `useSessionStatus` snapshot, the same store the sidebar's
- * "进行中" status uses. The Host re-checks before deleting, so this is
- * presentation, not enforcement.
+ * The row dims itself while the session owns live work (the host-provided
+ * `useSessionStatus` snapshot, the same store the sidebar's "进行中" status
+ * uses) but stays clickable: the dialog asks the Host what is running and
+ * offers a second-confirmed "stop and delete". The Host enforces the gate.
  *
  * Structure note (the lesson from the first cut): a menu row unmounts with
  * its menu, so the confirm dialog and the result toast must NOT live inside
@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     // Human-synced copy of package.json#version: client bundles cannot read
     // package.json at runtime. Bump together with `npm version`.
-    const VERSION = '1.6.2'
+    const VERSION = '1.7.0'
 
     const React = require('react')
     const h = React.createElement
@@ -32,10 +32,17 @@ window.__ModuleLoader__.load({
     const DICT = {
       zh: {
         menu: '删除会话',
-        menuBusy: '会话运行中，无法删除',
+        menuBusy: '会话运行中：确认框里可以先停止再删除',
         confirmTitle: '删除此会话？',
         confirmDesc: '将永久删除「{title}」的对话记录与本地数据，删除后无法恢复。',
-        confirmNote: '运行中的会话删不了（菜单会置灰）。\n删掉你正在看的会话也可以，界面会自动切到同工作区的新会话。\n万一删不彻底，会先隐藏并直接告诉你。',
+        confirmNote: '子代理会话会一并删除；分叉出去的会话和附件不会删除。\n删掉你正在看的会话也可以，界面会自动切到同工作区的新会话。\n万一删不彻底，会先隐藏并直接告诉你。',
+        confirmSubtree: '连同它的 {n} 个子代理会话一起删除。',
+        confirmForks: '由此分叉的 {n} 个会话不会被删除。',
+        confirmActive: '会话还有进行中的工作：{kinds}。可以先停止再删除。',
+        stopAndDelete: '停止并删除',
+        stopConfirm: '确定要停止并删除吗？会取消运行中的回合、子代理和后台任务，并删除它的提醒。',
+        stopTimeout: '已请求停止，但工作没能及时结束，本次没有删除，请稍后再试。',
+        kindTurn: '运行中的回合', kindSubagent: '子代理', kindJob: '后台任务', kindSchedule: '提醒', kindUnknown: '无法确认的活动',
         confirmBusy: '会话仍有进行中的工作，无法删除。',
         confirmAction: '永久删除',
         cancel: '取消',
@@ -43,6 +50,7 @@ window.__ModuleLoader__.load({
         done: '会话已删除',
         doneUnloaded: '会话已删除：数据已清除，列表里也不会再出现',
         doneLive: '数据已删除，但这次没能把会话彻底移除：先临时藏了起来（切到「显示已归档」能看到），重启 DSH 后彻底消失',
+        donePartial: '只删除了一部分：{message}',
         failed: '删除失败：{message}',
         cleanupFooter: '清理分组',
         cleanupTitle: '清理会话分组',
@@ -55,6 +63,9 @@ window.__ModuleLoader__.load({
         cleanupConfirmTitle: '清空「{title}」的全部会话？',
         cleanupConfirmDesc: '将永久删除该分组下的 {n} 个会话及其本地数据，删除后无法恢复。',
         cleanupBusyBlocked: '有 {n} 个会话正在运行，已整批取消：请等它们结束再来',
+        cleanupPrecheckFailed: '预检请求失败，未删除任何会话：{message}',
+        cleanupFailedItems: '失败的会话：{items}',
+        cleanupRemoveSkipped: '有 {m} 个会话没删成功，分组先保留，没有移除。',
         cleanupWorking: '正在删除 {done}/{total}…',
         cleanupDone: '已删除 {n} 个会话',
         cleanupPartial: '已删除 {n} 个，失败 {m} 个',
@@ -70,10 +81,17 @@ window.__ModuleLoader__.load({
       },
       en: {
         menu: 'Delete session',
-        menuBusy: 'Session is running; deletion unavailable',
+        menuBusy: 'Session is running: the dialog can stop it first',
         confirmTitle: 'Delete this session?',
         confirmDesc: 'This permanently deletes “{title}” — its chat history and local data. It cannot be undone.',
-        confirmNote: 'A running session cannot be deleted (its menu row greys out).\nDeleting the session you are viewing is fine: the view moves to a fresh session in the same workspace.\nIf a full delete is not possible, it is hidden and you are told right away.',
+        confirmNote: 'Subagent sessions go with it; forked sessions and attachments are kept.\nDeleting the session you are viewing is fine: the view moves to a fresh session in the same workspace.\nIf a full delete is not possible, it is hidden and you are told right away.',
+        confirmSubtree: 'Its {n} subagent session(s) are deleted with it.',
+        confirmForks: '{n} session(s) forked from it will be kept.',
+        confirmActive: 'The session still has work in progress: {kinds}. You can stop it and delete.',
+        stopAndDelete: 'Stop and delete',
+        stopConfirm: 'Stop and delete? This cancels the running turn, subagents and background jobs, and removes its reminders.',
+        stopTimeout: 'Stop was requested but the work did not finish in time; nothing was deleted. Try again shortly.',
+        kindTurn: 'running turn', kindSubagent: 'subagents', kindJob: 'background jobs', kindSchedule: 'reminders', kindUnknown: 'unverifiable activity',
         confirmBusy: 'The session still has work in progress and cannot be deleted.',
         confirmAction: 'Delete permanently',
         cancel: 'Cancel',
@@ -81,6 +99,7 @@ window.__ModuleLoader__.load({
         done: 'Session deleted',
         doneUnloaded: 'Session deleted: the data is gone and it will not come back in the list',
         doneLive: 'The data is deleted, but the session itself could not be fully removed this time: it is hidden for now (visible under “show archived”) and disappears for good after a DSH restart',
+        donePartial: 'Only partly deleted: {message}',
         failed: 'Delete failed: {message}',
         cleanupFooter: 'Clean workspace',
         cleanupTitle: 'Clean a workspace',
@@ -93,6 +112,9 @@ window.__ModuleLoader__.load({
         cleanupConfirmTitle: 'Delete every session in “{title}”?',
         cleanupConfirmDesc: 'This permanently deletes the {n} session(s) in that workspace and their local data. It cannot be undone.',
         cleanupBusyBlocked: '{n} session(s) are running, so the whole batch was cancelled — try again once they finish',
+        cleanupPrecheckFailed: 'The pre-flight request failed; nothing was deleted: {message}',
+        cleanupFailedItems: 'Failed sessions: {items}',
+        cleanupRemoveSkipped: '{m} session(s) could not be deleted, so the group was kept.',
         cleanupWorking: 'Deleting {done}/{total}…',
         cleanupDone: 'Deleted {n} session(s)',
         cleanupPartial: 'Deleted {n}, {m} failed',
@@ -120,7 +142,7 @@ window.__ModuleLoader__.load({
 .dsh-sd-title { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
 .dsh-sd-desc { margin: 0 0 14px; font-size: 15.5px; line-height: 23px; color: var(--dsw-alias-label-secondary, #aaa); word-break: break-all; }
 .dsh-sd-note { margin: -6px 0 14px; font-size: 15px; line-height: 21px; color: var(--dsw-alias-label-secondary, #999); white-space: pre-line; }
-.dsh-sd-warn { margin: 0 0 14px; font-size: 15.5px; color: var(--dsw-alias-state-error-primary, #f85149); }
+.dsh-sd-warn { margin: 0 0 14px; font-size: 15.5px; color: var(--dsw-alias-state-error-primary, #f85149); white-space: pre-line; word-break: break-all; }
 .dsh-sd-footer { display: flex; justify-content: flex-end; gap: 8px; }
 .dsh-sd-btn { padding: 7px 16px; border-radius: 8px; border: .5px solid var(--dsw-alias-border-l2, #444); background: transparent; color: inherit; font: inherit; font-size: 15.5px; cursor: pointer; }
 .dsh-sd-btn:disabled { opacity: .55; cursor: default; }
@@ -152,6 +174,99 @@ window.__ModuleLoader__.load({
       ctx.locale.register(NS, 'zh', DICT.zh)
       ctx.locale.register(NS, 'en', DICT.en)
       return ctx.locale.bind(NS)
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Plain HTTP helpers (no React) — shared by the single and the batch
+     * flows, and exercised directly by tools/smoke-client.mjs.
+     * ------------------------------------------------------------------ */
+
+    const API = '/_dsh-session-clean'
+    /** Ids per pre-flight request; the Host accepts up to 5000. */
+    const PRECHECK_CHUNK = 1000
+    const messageOf = (reason) => (reason instanceof Error ? reason.message : String(reason))
+
+    /** POST one JSON body; never throws for HTTP errors, only for transport failures. */
+    async function postJson(fetchImpl, path, body) {
+      const response = await fetchImpl(`${API}${path}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const payload = await response.json().catch(() => ({}))
+      return { status: response.status, ok: response.ok, payload }
+    }
+
+    /**
+     * Bulk pre-flight. Keeps "some member is running" apart from "the
+     * pre-flight itself failed" — the old build reported both as running.
+     * @returns {Promise<{kind: 'ok'} | {kind: 'busy', busy: object[]} | {kind: 'failed', message: string}>}
+     */
+    async function precheckBatch(fetchImpl, sessionIds) {
+      const busy = []
+      for (let start = 0; start < sessionIds.length; start += PRECHECK_CHUNK) {
+        const chunk = sessionIds.slice(start, start + PRECHECK_CHUNK)
+        let result
+        try {
+          result = await postJson(fetchImpl, '/precheck', { sessionIds: chunk })
+        } catch (reason) {
+          return { kind: 'failed', message: messageOf(reason) }
+        }
+        if (!result.ok || typeof result.payload?.ok !== 'boolean') {
+          return { kind: 'failed', message: result.payload?.error ?? `HTTP ${result.status}` }
+        }
+        if (Array.isArray(result.payload.busy)) busy.push(...result.payload.busy)
+      }
+      return busy.length === 0 ? { kind: 'ok' } : { kind: 'busy', busy }
+    }
+
+    /**
+     * Delete a batch one session at a time, collecting every failure.
+     * @returns {Promise<{ok: number, hidden: number, failed: Array<{sessionId: string, error: string}>}>}
+     */
+    async function deleteSerially(fetchImpl, sessionIds, onProgress) {
+      let ok = 0
+      let hidden = 0
+      const failed = []
+      for (let index = 0; index < sessionIds.length; index += 1) {
+        const sessionId = sessionIds[index]
+        try {
+          const result = await postJson(fetchImpl, '/delete', { sessionId })
+          if (result.ok && result.payload?.ok === true) {
+            ok += 1
+            if (result.payload.hidden === true) hidden += 1
+          } else {
+            failed.push({ sessionId, error: result.payload?.error ?? `HTTP ${result.status}` })
+          }
+        } catch (reason) {
+          failed.push({ sessionId, error: messageOf(reason) })
+        }
+        onProgress?.(index + 1, sessionIds.length)
+      }
+      return { ok, hidden, failed }
+    }
+
+    /** Only top-level ids cross the wire; subagent children go with their root. */
+    const TOP_LEVEL_RE = /^session-[0-9a-fA-F-]{36}$/
+
+    /** "Clean and remove group" may only unregister a group that is really empty now. */
+    const shouldRemoveGroup = (result) => result !== null && Array.isArray(result.failed) && result.failed.length === 0
+
+    /** Short human list of failed entries for the panel. */
+    function describeFailures(failed, limit = 3) {
+      const head = failed.slice(0, limit).map((entry) => `${entry.sessionId.slice(0, 17)}…（${entry.error}）`)
+      return head.join('；') + (failed.length > limit ? ` +${failed.length - limit}` : '')
+    }
+
+    /** Activity kinds → readable words. */
+    function describeActivity(active, t) {
+      const kinds = new Set()
+      for (const member of Array.isArray(active) ? active : []) {
+        for (const entry of member?.activity ?? []) kinds.add(entry?.kind)
+      }
+      const word = { turn: 'kindTurn', subagent: 'kindSubagent', job: 'kindJob', schedule: 'kindSchedule' }
+      return [...kinds].map((kind) => t(word[kind] ?? 'kindUnknown')).join('、')
     }
 
     /* ------------------------------------------------------------------ *
@@ -245,19 +360,19 @@ window.__ModuleLoader__.load({
       return h('button', {
         type: 'button',
         role: 'menuitem',
-        disabled: busy,
+        // A running session stays reachable: the dialog shows what runs and
+        // offers a confirmed stop-and-delete; the Host enforces either way.
         title: busy ? t('menuBusy') : undefined,
         style: busy
-          ? { opacity: 0.45, cursor: 'default', color: 'var(--dsw-alias-state-error-primary, #f85149)' }
+          ? { opacity: 0.7, cursor: 'pointer', color: 'var(--dsw-alias-state-error-primary, #f85149)' }
           : { color: 'var(--dsw-alias-state-error-primary, #f85149)', cursor: 'pointer' },
         onClick: () => {
-          if (busy) return
           setMenuOpen(false)
           requestDelete(sessionId, displayTitle, { workspaceId, wasOpen: isMainViewOpen() })
         },
       },
         h(TrashIcon),
-        h('span', { style: { marginLeft: 8 } }, busy ? t('menuBusy') : t('menu')),
+        h('span', { style: { marginLeft: 8 } }, t('menu')),
       )
     }
 
@@ -271,25 +386,47 @@ window.__ModuleLoader__.load({
       const [deleting, setDeleting] = React.useState(false)
       const [error, setError] = React.useState(null)
       const [toast, setToast] = React.useState(null)
+      // Host facts for the open request: subtree size, kept forks, activity.
+      const [info, setInfo] = React.useState(null)
+      // Second confirmation for "stop and delete".
+      const [stopStage, setStopStage] = React.useState(false)
 
       React.useEffect(() => {
         if (toast === null) return
-        const timer = window.setTimeout(() => setToast(null), 3200)
+        const timer = window.setTimeout(() => setToast(null), 3600)
         return () => window.clearTimeout(timer)
       }, [toast])
 
-      // A fresh request opens with clean in-flight/error state.
+      // A fresh request opens with clean state and asks the Host what the
+      // deletion covers (subagents go with it, forks stay) and whether it
+      // still owns work.
       React.useEffect(() => {
         setError(null)
         setDeleting(false)
+        setInfo(null)
+        setStopStage(false)
+        const sessionId = request?.sessionId
+        if (typeof sessionId !== 'string') return
+        let alive = true
+        fetch(`${API}/status?sessionId=${encodeURIComponent(sessionId)}`, { credentials: 'same-origin' })
+          .then((response) => response.json())
+          .then((payload) => {
+            if (!alive || typeof payload?.busy !== 'boolean') return
+            setInfo({
+              subagents: Number(payload.subagents) || 0,
+              forks: Number(payload.forks) || 0,
+              active: payload.busy ? payload.active ?? [] : [],
+            })
+          })
+          .catch(() => {})
+        return () => { alive = false }
       }, [request?.sessionId])
 
       /**
        * Leave the dead conversation: if the session that was just deleted is
        * the one the main view was showing, start a fresh session in the same
        * workspace so the user is not left staring at a removed transcript.
-       * Best effort only — a missing/failing uiWorkspace must never turn a
-       * successful delete into a reported failure.
+       * Best effort only.
        * @param {string | undefined} workspaceId - owning workspace, when known.
        */
       const leaveDeletedConversation = (workspaceId) => {
@@ -303,58 +440,66 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const callDelete = async (sessionId) => {
+      /** Re-pull the session baseline: a cold delete leaves no unload event behind. */
+      const refreshSessions = () => {
+        try {
+          const refreshed = ctx?.get?.('sessions')?.refresh?.()
+          if (refreshed && typeof refreshed.catch === 'function') refreshed.catch(() => {})
+        } catch {
+          // Refresh is a convenience.
+        }
+      }
+
+      const callDelete = async (sessionId, stopActivity) => {
         setDeleting(true)
         setError(null)
         const wasOpen = pendingRequest?.wasOpen === true
         const workspaceId = pendingRequest?.workspaceId
         try {
-          const response = await fetch('/_dsh-session-clean/delete', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId }),
-          })
-          const payload = await response.json().catch(() => ({}))
-          if (!response.ok || payload?.ok !== true) {
-            throw new Error(payload?.error ?? `HTTP ${response.status}`)
+          const { status, ok, payload } = await postJson(fetch, '/delete', stopActivity ? { sessionId, stopActivity: true } : { sessionId })
+          if (status === 409) {
+            // The Host found work the menu did not know about (or a stop did
+            // not finish): show what is running and offer stop-and-delete.
+            setInfo((current) => ({ subagents: 0, forks: 0, ...(current ?? {}), active: payload?.active ?? [] }))
+            setStopStage(false)
+            if (payload?.code === 'stop-timeout') setError(t('stopTimeout'))
+            return
           }
-          // Three honest outcomes, never one blanket "deleted": the Host
-          // unloaded the session for real / it stayed resident and was only
-          // hidden (degraded probe) / it was already cold.
-          const unloaded = payload?.unloaded === true
-          const stillLive = payload?.live === true
-          setToast(t(unloaded ? 'doneUnloaded' : stillLive ? 'doneLive' : 'done'))
+          if (!ok || !Array.isArray(payload?.deleted)) throw new Error(payload?.error ?? `HTTP ${status}`)
           settleRequest()
-          // Re-pull the session baseline: a *cold* delete leaves no unload
-          // event behind, so without this the dead row lingers in the client
-          // list (and drops into "ungrouped" once its registry slot is gone).
-          // `sessions.refresh()` is the controller's single-flight
-          // `session.list` pull; a failure here must not fail the delete.
-          try {
-            const sessions = ctx?.get?.('sessions')
-            const refreshed = sessions?.refresh?.()
-            if (refreshed && typeof refreshed.catch === 'function') refreshed.catch(() => {})
-          } catch {
-            // Refresh is a convenience; the delete already succeeded.
+          refreshSessions()
+          if (payload.ok !== true) {
+            setToast({ ok: false, text: t('donePartial', { message: payload.error ?? '' }) })
+            return
           }
-          // Only when the main view was actually showing the deleted session
-          // AND the row is really gone (a "hidden for now" session stays open).
-          if (wasOpen && !stillLive) window.setTimeout(() => leaveDeletedConversation(workspaceId), 0)
+          // Three honest outcomes, never one blanket "deleted": unloaded for
+          // real / still resident and only hidden / already cold.
+          const hidden = payload.hidden === true
+          const unloaded = Array.isArray(payload.unloaded) && payload.unloaded.length > 0
+          setToast({ ok: true, text: t(hidden ? 'doneLive' : unloaded ? 'doneUnloaded' : 'done') })
+          // Only when the main view showed the deleted session AND its row is
+          // really gone (a "hidden for now" session stays open).
+          if (wasOpen && payload.live !== true) window.setTimeout(() => leaveDeletedConversation(workspaceId), 0)
         } catch (reason) {
-          setError(reason instanceof Error ? reason.message : String(reason))
+          setError(messageOf(reason))
         } finally {
           setDeleting(false)
         }
       }
 
+      const active = info?.active ?? []
+      const busy = active.length > 0
       return h(React.Fragment, null,
         request !== null && h('div', { className: 'dsh-sd-overlay', role: 'presentation' },
           h('div', { className: 'dsh-sd-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': t('confirmTitle') },
             h('h2', { className: 'dsh-sd-title' }, t('confirmTitle')),
             h('p', { className: 'dsh-sd-desc' },
               t('confirmDesc', { title: request.displayTitle || request.sessionId })),
+            (info?.subagents ?? 0) > 0 && h('p', { className: 'dsh-sd-note' }, t('confirmSubtree', { n: info.subagents })),
+            (info?.forks ?? 0) > 0 && h('p', { className: 'dsh-sd-note' }, t('confirmForks', { n: info.forks })),
             h('p', { className: 'dsh-sd-note' }, t('confirmNote')),
+            busy && h('p', { className: 'dsh-sd-warn' },
+              stopStage ? t('stopConfirm') : t('confirmActive', { kinds: describeActivity(active, t) })),
             error !== null && h('p', { className: 'dsh-sd-warn' }, t('failed', { message: error })),
             h('div', { className: 'dsh-sd-footer' },
               h('button', {
@@ -364,12 +509,16 @@ window.__ModuleLoader__.load({
               h('button', {
                 type: 'button', className: 'dsh-sd-btn', 'data-danger': true,
                 disabled: deleting,
-                onClick: () => { void callDelete(request.sessionId) },
-              }, deleting ? t('deleting') : t('confirmAction')),
+                onClick: () => {
+                  if (!busy) void callDelete(request.sessionId, false)
+                  else if (!stopStage) setStopStage(true)
+                  else void callDelete(request.sessionId, true)
+                },
+              }, deleting ? t('deleting') : busy ? t('stopAndDelete') : t('confirmAction')),
             ),
           ),
         ),
-        toast !== null && h('div', { className: 'dsh-sd-toast' }, toast),
+        toast !== null && h('div', { className: 'dsh-sd-toast', 'data-ok': String(toast.ok) }, toast.text),
       )
     }
 
@@ -567,12 +716,14 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Delete one batch serially behind the whole-batch idle gate.
+       * Delete one batch serially behind the whole-batch idle gate. Only
+       * top-level ids are sent: subagent children go with their root.
        * @param {string[]} sessionIds - every member to delete.
-       * @returns {Promise<{ok: number, failed: number, openDeleted: boolean} | null>} null when refused.
+       * @returns {Promise<{ok: number, failed: Array<{sessionId: string, error: string}>, openDeleted: boolean} | null>} null when refused.
        */
       const deleteBatch = async (sessionIds) => {
         setError(null)
+        const ids = sessionIds.filter((sessionId) => TOP_LEVEL_RE.test(sessionId))
         // Read the main-view retain counts BEFORE deleting: an unload clears
         // them, so afterwards there is no way to tell whether the conversation
         // on screen was part of this batch.
@@ -584,52 +735,35 @@ window.__ModuleLoader__.load({
             return false
           }
         })
-        try {
-          const query = sessionIds.map((sessionId) => encodeURIComponent(sessionId)).join(',')
-          const precheck = await fetch(`/_dsh-session-clean/precheck?sessionIds=${query}`, {
-            credentials: 'same-origin',
-          }).then((response) => response.json()).catch(() => ({}))
-          if (precheck?.ok !== true) {
-            const busy = Array.isArray(precheck?.busy) ? precheck.busy.length : sessionIds.length
-            setError(t('cleanupBusyBlocked', { n: busy }))
-            return null
-          }
-          let ok = 0
-          let failed = 0
-          setProgress({ done: 0, total: sessionIds.length })
-          for (let index = 0; index < sessionIds.length; index += 1) {
-            try {
-              const response = await fetch('/_dsh-session-clean/delete', {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ sessionId: sessionIds[index] }),
-              })
-              const payload = await response.json().catch(() => ({}))
-              if (response.ok && payload?.ok === true) ok += 1
-              else failed += 1
-            } catch {
-              failed += 1
-            }
-            setProgress({ done: index + 1, total: sessionIds.length })
-          }
-          refreshSessions()
-          setProgress(null)
-          setToast(failed === 0 ? t('cleanupDone', { n: ok }) : t('cleanupPartial', { n: ok, m: failed }))
-          return { ok, failed, openDeleted }
-        } catch (reason) {
-          setError(reason instanceof Error ? reason.message : String(reason))
-          setProgress(null)
+        const precheck = await precheckBatch(fetch, ids)
+        if (precheck.kind === 'failed') {
+          setError(t('cleanupPrecheckFailed', { message: precheck.message }))
           return null
         }
+        if (precheck.kind === 'busy') {
+          setError(t('cleanupBusyBlocked', { n: precheck.busy.length }))
+          return null
+        }
+        setProgress({ done: 0, total: ids.length })
+        const result = await deleteSerially(fetch, ids, (done, total) => setProgress({ done, total }))
+        refreshSessions()
+        setProgress(null)
+        if (result.failed.length === 0) setToast(t('cleanupDone', { n: result.ok }))
+        else {
+          setToast(t('cleanupPartial', { n: result.ok, m: result.failed.length }))
+          setError(t('cleanupFailedItems', { items: describeFailures(result.failed) }))
+        }
+        return { ok: result.ok, failed: result.failed, openDeleted }
       }
 
       /** Manual panel: clean one live workspace. */
       const cleanWorkspace = async (workspace) => {
         const result = await deleteBatch([...(workspace?.sessionIds ?? [])])
         if (result === null) return
-        setTarget(null)
-        if (result.failed === 0) publishCleanup({ open: false })
+        if (result.failed.length === 0) {
+          setTarget(null)
+          publishCleanup({ open: false })
+        }
         // The workspace still exists, so land in a fresh session of it rather
         // than staying on the transcript we just deleted.
         if (result.openDeleted) {
@@ -650,22 +784,28 @@ window.__ModuleLoader__.load({
       const cleanUngrouped = async (sessionIds) => {
         const result = await deleteBatch([...sessionIds])
         if (result === null) return
-        setTarget(null)
-        if (result.failed === 0) publishCleanup({ open: false })
+        if (result.failed.length === 0) {
+          setTarget(null)
+          publishCleanup({ open: false })
+        }
         if (result.openDeleted) openFirstAliveWorkspace('')
       }
 
       /**
        * Clean one workspace AND unregister the group in one pass — the panel's
        * "thorough" action. The group removal reuses the shipped
-       * workspaces.delete, so the sidebar bookkeeping is exactly what the
-       * official action would have done; the difference is that the sessions
-       * are gone first instead of spilling into Ungrouped.
+       * workspaces.delete. When any session failed to delete the group is
+       * KEPT: removing it would spill the survivors into Ungrouped.
        * @param {{workspaceId: string, title?: string, path?: string, sessionIds: string[]}} workspace - target group.
        */
       const cleanWorkspaceAndRemove = async (workspace) => {
         const result = await deleteBatch([...(workspace?.sessionIds ?? [])])
         if (result === null) return
+        if (!shouldRemoveGroup(result)) {
+          setError(`${t('cleanupRemoveSkipped', { m: result.failed.length })}\n${t('cleanupFailedItems', { items: describeFailures(result.failed) })}`)
+          if (result.openDeleted) openFirstAliveWorkspace(workspace.workspaceId)
+          return
+        }
         let removed = false
         try {
           const workspaces = ctx?.get?.('workspaces')
@@ -676,7 +816,7 @@ window.__ModuleLoader__.load({
             setError(t('cleanupRemoveUnavailable'))
           }
         } catch (reason) {
-          setError(reason instanceof Error ? reason.message : String(reason))
+          setError(messageOf(reason))
         }
         setTarget(null)
         if (removed) {
@@ -824,6 +964,8 @@ window.__ModuleLoader__.load({
     }
 
     return {
+      // Pure helpers for tools/smoke-client.mjs; the plugin loader reads only inject/apply.
+      __internals: { precheckBatch, deleteSerially, shouldRemoveGroup, describeFailures, describeActivity, TOP_LEVEL_RE },
       inject: ['slots', 'locale'],
       apply(ctx) {
         ensureStyles()
