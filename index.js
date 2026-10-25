@@ -631,6 +631,10 @@ async function deleteSession(ctx, state, rootId, stopActivity) {
   const preArchived = new Set(idsOf(registry.archivedSessionIds))
   const prePinned = idsOf(registry.pinnedSessionIds).filter((id) => members.includes(id))
   const archivedByUs = []
+  // Undo a refused/timed-out delete. Pins cannot be re-inserted at their exact
+  // index through the public API (`pinSession` prepends), so a previously
+  // pinned member comes back at the FRONT of the pin list — pinned again, which
+  // is what matters, but not byte-identical order.
   const rollback = async () => {
     for (const id of archivedByUs.reverse()) {
       try { await registry.unarchiveSession(id) } catch { /* best effort */ }
