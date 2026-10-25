@@ -562,6 +562,12 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
   check('[4] 600 ids pre-flight fine (old cap was 200)', okRes.status === 200 && okRes.body.ok === true && okRes.body.total === 600, `status=${okRes.status}`)
   const busyRes = await call('POST', '/_dsh-session-clean/precheck', { sessionIds: [...many.slice(0, 5), BUSY] })
   check('[4] a busy member flips ok=false and is reported with its activity', busyRes.body.ok === false && busyRes.body.busy.length === 1 && busyRes.body.busy[0].active[0].activity[0].kind === 'turn')
+  for (let i = 0; i < 3000; i += 1) headers.set(`h-${i}`, { id: `h-${i}`, cwd: WORK, parentSession: i % 3 === 0 ? `h-${i - 1}` : undefined, origin: i % 3 === 0 ? 'subagent' : undefined })
+  const started = Date.now()
+  const full = await call('POST', '/_dsh-session-clean/precheck', { sessionIds: Array.from({ length: 5000 }, top) })
+  const elapsed = Date.now() - started
+  for (let i = 0; i < 3000; i += 1) headers.delete(`h-${i}`)
+  check('[4] 5000 ids over 3000 headers pre-flight in bounded time', full.status === 200 && full.body.total === 5000 && elapsed < 5000, `${elapsed}ms status=${full.status}`)
   check('[4] 5001 ids → 413', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: Array.from({ length: 5001 }, top) })).status === 413)
   check('[4] empty → 400', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: [] })).status === 400)
   check('[4] malformed member → 400', (await call('POST', '/_dsh-session-clean/precheck', { sessionIds: ['x'] })).status === 400)

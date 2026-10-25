@@ -297,13 +297,7 @@ const isSubagentHeader = (header) => header?.origin === 'subagent' && typeof hea
  * @returns {{ members: string[], forks: string[] }}
  */
 function collectSubtree(headers, rootId) {
-  const children = new Map()
-  for (const header of headers.values()) {
-    if (!isSubagentHeader(header)) continue
-    const siblings = children.get(header.parentSession) ?? []
-    siblings.push(header.id)
-    children.set(header.parentSession, siblings)
-  }
+  const { children, lineageChildren } = lineageOf(headers)
   const members = []
   const seen = new Set([rootId])
   const queue = [rootId]
@@ -317,11 +311,34 @@ function collectSubtree(headers, rootId) {
     }
   }
   const forks = []
-  for (const header of headers.values()) {
-    if (isSubagentHeader(header) || seen.has(header.id)) continue
-    if (typeof header.parentSession === 'string' && seen.has(header.parentSession)) forks.push(header.id)
+  for (const id of members) {
+    for (const header of lineageChildren.get(id) ?? []) {
+      if (!isSubagentHeader(header) && !seen.has(header.id)) forks.push(header.id)
+    }
   }
   return { members, forks }
+}
+
+/** Parent → children indexes, built once per header snapshot (a bulk pre-flight reuses them). */
+const lineageCache = new WeakMap()
+function lineageOf(headers) {
+  let lineage = lineageCache.get(headers)
+  if (lineage !== undefined) return lineage
+  const children = new Map()
+  const lineageChildren = new Map()
+  for (const header of headers.values()) {
+    if (typeof header?.parentSession !== 'string') continue
+    const all = lineageChildren.get(header.parentSession) ?? []
+    all.push(header)
+    lineageChildren.set(header.parentSession, all)
+    if (!isSubagentHeader(header)) continue
+    const siblings = children.get(header.parentSession) ?? []
+    siblings.push(header.id)
+    children.set(header.parentSession, siblings)
+  }
+  lineage = { children, lineageChildren }
+  lineageCache.set(headers, lineage)
+  return lineage
 }
 
 /* ------------------------------------------------------------------------ *
